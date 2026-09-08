@@ -8,10 +8,16 @@ import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import type { AuthenticatedUser } from "../../common/guards/jwt-auth.guard";
 
+// In production the web app and API are deployed on two different domains
+// (e.g. Vercel + Railway), so the auth cookie must be sameSite:"none" to be
+// sent on cross-origin requests at all — which in turn requires secure:true
+// (browsers reject sameSite:"none" without it). Locally, both run on
+// http://localhost on different ports, which browsers treat as same-site,
+// so "lax" without "secure" is used there instead.
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
-  sameSite: "lax" as const,
+  sameSite: (process.env.NODE_ENV === "production" ? "none" : "lax") as "none" | "lax",
   path: "/",
 };
 
