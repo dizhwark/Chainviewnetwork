@@ -1,43 +1,100 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgis/postgis:16-3.4-alpine
     environment:
-      POSTGRES_USER: chainview
-      POSTGRES_PASSWORD: chainview
-      POSTGRES_DB: chainview
+      POSTGRES_USER: maybe
+      POSTGRES_PASSWORD: maybe
+      POSTGRES_DB: maybe
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chainview -d chainview"]
+      test: ["CMD-SHELL", "pg_isready -U maybe -d maybe"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  backend:
-    build: ./backend
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
     environment:
-      DATABASE_URL: postgresql+psycopg://chainview:chainview@postgres:5432/chainview
-      SEC_USER_AGENT: "ChainView Network research@chainview.network"
-      CORS_ORIGINS: '["http://localhost:5173","http://localhost:4173"]'
+      MINIO_ROOT_USER: maybe-dev
+      MINIO_ROOT_PASSWORD: maybe-dev-secret
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 maybe-dev maybe-dev-secret &&
+      mc mb -p local/maybe-uploads &&
+      mc anonymous set download local/maybe-uploads
+      "
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://maybe:maybe@postgres:5432/maybe
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: maybe-uploads
+      S3_ACCESS_KEY_ID: maybe-dev
+      S3_SECRET_ACCESS_KEY: maybe-dev-secret
+      S3_FORCE_PATH_STYLE: "true"
+      API_PORT: 4000
+      WEB_BASE_URL: http://localhost:3000
+    env_file:
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     ports:
-      - "8000:8000"
-    command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      - "4000:4000"
 
-  frontend:
+  web:
     build:
-      context: ./frontend
+      context: .
+      dockerfile: apps/web/Dockerfile
       args:
-        VITE_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+    environment:
+      API_BASE_URL: http://api:4000
+    env_file:
+      - .env
     depends_on:
-      - backend
+      - api
     ports:
-      - "4173:4173"
+      - "3000:3000"
 
 volumes:
   postgres_data:
+  minio_data:

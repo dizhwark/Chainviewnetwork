@@ -1,23 +1,14 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-*.egg-info/
-.pytest_cache/
-.coverage
-
-# Node
 node_modules/
 dist/
-.vite/
-*.tsbuildinfo
-
-# Env
+build/
+.next/
+.turbo/
+coverage/
+*.log
 .env
 .env.local
-
-# OS / editors
 .DS_Store
-.idea/
-.vscode/
+apps/api/generated/
+apps/api/prisma/dev.db
+*.tsbuildinfo
+.vercel/
