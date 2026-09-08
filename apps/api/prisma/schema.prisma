@@ -1,0 +1,1226 @@
+// MAYBE — full data model (docs/database-erd.md is the prose companion to this file).
+// PostGIS extension is enabled via migration 0000_enable_postgis.sql. Geospatial columns
+// are modelled here as plain Float lat/lng (queryable directly through Prisma Client for
+// MVP-scale radius checks) plus a documented raw-SQL `geography(Point,4326)` generated
+// column + GiST index added in migration 0002_postgis_geography_columns.sql for
+// production-grade PostGIS distance queries — see that migration's header comment.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  CUSTOMER
+  PLUMBER
+  SUPPORT_AGENT
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETION_REQUESTED
+  DELETED
+}
+
+model User {
+  id                  String     @id @default(uuid())
+  email               String     @unique
+  phone               String?
+  passwordHash        String?
+  fullName            String
+  role                UserRole
+  status              UserStatus @default(ACTIVE)
+  emailVerifiedAt     DateTime?
+  phoneVerifiedAt     DateTime?
+  mfaEnabled          Boolean    @default(false)
+  mfaSecret           String?
+  profilePhotoMediaId String?
+  marketingConsent    Boolean    @default(false)
+  googleSubject       String?    @unique
+  appleSubject        String?    @unique
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  deletedAt           DateTime?
+
+  sessions             UserSession[]
+  customerProfile      CustomerProfile?
+  plumberProfile       PlumberProfile?
+  policyAcceptances    PolicyAcceptance[]
+  sentMessages         Message[]            @relation("MessageSender")
+  auditLogsAsActor     AuditLog[]           @relation("AuditActor")
+  notifications        Notification[]
+  supportCasesOpened   SupportCase[]        @relation("SupportCaseOpener")
+  supportCasesAssigned SupportCase[]        @relation("SupportCaseAssignee")
+  supportMessages      SupportCaseMessage[]
+  verificationReviews  VerificationReview[] @relation("VerificationReviewer")
+  reviewReports        ReviewReport[]
+  analyticsEvents      AnalyticsEvent[]
+
+  @@index([role])
+  @@index([status])
+}
+
+model UserSession {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  refreshTokenHash String
+  userAgent        String?
+  ipAddress        String?
+  createdAt        DateTime  @default(now())
+  expiresAt        DateTime
+  revokedAt        DateTime?
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Customer
+// ---------------------------------------------------------------------------
+
+model CustomerProfile {
+  id                      String   @id @default(uuid())
+  userId                  String   @unique
+  user                    User     @relation(fields: [userId], references: [id])
+  notificationPreferences Json     @default("{}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  addresses         CustomerAddress[]
+  bookings          Booking[]
+  paymentMethods    PaymentMethodRef[]
+  reviews           Review[]
+  favorites         FavoritePlumber[]
+  blockedPlumbers   BlockedRelationship[] @relation("CustomerBlocks")
+  disputes          Dispute[]
+  invoices          Invoice[]
+  customerApprovals CustomerApproval[]
+
+  @@index([userId])
+}
+
+model CustomerAddress {
+  id                String          @id @default(uuid())
+  customerProfileId String
+  customerProfile   CustomerProfile @relation(fields: [customerProfileId], references: [id])
+  label             String?
+  line1             String
+  line2             String?
+  city              String
+  province          String          @default("ON")
+  postalCode        String
+  lat               Float?
+  lng               Float?
+  isDefault         Boolean         @default(false)
+  createdAt         DateTime        @default(now())
+
+  bookings Booking[]
+
+  @@index([customerProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Plumber & verification
+// ---------------------------------------------------------------------------
+
+enum BusinessType {
+  SOLE_PROPRIETOR
+  PARTNERSHIP
+  CORPORATION
+}
+
+model PlumbingBusiness {
+  id           String       @id @default(uuid())
+  legalName    String
+  businessName String
+  businessType BusinessType
+  hstNumber    String?
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  province     String?      @default("ON")
+  postalCode   String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  plumbers PlumberProfile[]
+}
+
+enum PlumberApprovalStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  MORE_INFO_REQUIRED
+  APPROVED
+  REJECTED
+  EXPIRED
+  SUSPENDED
+}
+
+model PlumberProfile {
+  id                        String                @id @default(uuid())
+  userId                    String                @unique
+  user                      User                  @relation(fields: [userId], references: [id])
+  businessId                String?
+  business                  PlumbingBusiness?     @relation(fields: [businessId], references: [id])
+  biography                 String?
+  yearsExperience           Int                   @default(0)
+  profilePhotoMediaId       String?
+  businessLogoMediaId       String?
+  approvalStatus            PlumberApprovalStatus @default(DRAFT)
+  isOnline                  Boolean               @default(false)
+  isSuspended               Boolean               @default(false)
+  suspensionReason          String?
+  commissionPercentOverride Int?
+  stripeConnectAccountId    String?
+  stripeConnectStatus       String?
+  averageRating             Float                 @default(0)
+  reviewCount               Int                   @default(0)
+  acceptanceRatePercent     Float                 @default(0)
+  cancellationRatePercent   Float                 @default(0)
+  avgResponseSeconds        Int                   @default(0)
+  isFeaturedEligible        Boolean               @default(false)
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+
+  licenses                PlumberLicense[]
+  insuranceDocuments      PlumberInsuranceDocument[]
+  verificationReviews     VerificationReview[]
+  services                PlumberService[]
+  serviceAreas            PlumberServiceArea[]
+  availabilityRules       AvailabilityRule[]
+  availabilityExceptions  AvailabilityException[]
+  bookings                Booking[]
+  dispatchOffers          DispatchOffer[]
+  locationEvents          LocationEvent[]
+  reviews                 Review[]
+  favoritedBy             FavoritePlumber[]
+  blockedCustomers        BlockedRelationship[]      @relation("PlumberBlocks")
+  disputes                Dispute[]
+  invoices                Invoice[]
+  payouts                 Payout[]
+  subscriptions           Subscription[]
+  promotions              Promotion[]
+  serviceRequestsAssigned ServiceRequest[]
+
+  @@index([approvalStatus])
+  @@index([isOnline])
+}
+
+model PlumberLicense {
+  id               String                @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile        @relation(fields: [plumberProfileId], references: [id])
+  licenseNumber    String
+  licenseType      String
+  issuingAuthority String
+  expiresOn        DateTime
+  documentMediaId  String
+  status           PlumberApprovalStatus @default(SUBMITTED)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([plumberProfileId])
+  @@index([expiresOn])
+}
+
+model PlumberInsuranceDocument {
+  id                  String                @id @default(uuid())
+  plumberProfileId    String
+  plumberProfile      PlumberProfile        @relation(fields: [plumberProfileId], references: [id])
+  provider            String
+  policyNumber        String
+  coverageAmountCents Int
+  expiresOn           DateTime
+  documentMediaId     String
+  status              PlumberApprovalStatus @default(SUBMITTED)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@index([plumberProfileId])
+  @@index([expiresOn])
+}
+
+model VerificationReview {
+  id               String                @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile        @relation(fields: [plumberProfileId], references: [id])
+  reviewerUserId   String
+  reviewer         User                  @relation("VerificationReviewer", fields: [reviewerUserId], references: [id])
+  decision         PlumberApprovalStatus
+  reason           String?
+  createdAt        DateTime              @default(now())
+
+  @@index([plumberProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue, zones, availability
+// ---------------------------------------------------------------------------
+
+enum PricingMethod {
+  FIXED
+  HOURLY
+  DIAGNOSTIC_THEN_ESTIMATE
+}
+
+model ServiceCategory {
+  id                      String        @id @default(uuid())
+  slug                    String        @unique
+  name                    String
+  description             String
+  iconName                String?
+  active                  Boolean       @default(true)
+  emergencyEligible       Boolean       @default(false)
+  diagnosticQuestions     Json          @default("[]")
+  pricingMethod           PricingMethod @default(FIXED)
+  baseDiagnosticFeeCents  Int           @default(0)
+  estimatedRangeMinCents  Int
+  estimatedRangeMaxCents  Int
+  requiredSkills          String[]      @default([])
+  expectedDurationMinutes Int           @default(60)
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+
+  plumberServices PlumberService[]
+  serviceRequests ServiceRequest[]
+  bookings        Booking[]
+}
+
+model PlumberService {
+  id               String          @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile  @relation(fields: [plumberProfileId], references: [id])
+  categoryId       String
+  category         ServiceCategory @relation(fields: [categoryId], references: [id])
+  priceCents       Int?
+  pricingMethod    PricingMethod?
+  active           Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+
+  @@unique([plumberProfileId, categoryId])
+}
+
+model ServiceZone {
+  id              String   @id @default(uuid())
+  name            String
+  province        String   @default("ON")
+  postalPrefixes  String[]
+  centerLat       Float
+  centerLng       Float
+  radiusKm        Float
+  boundaryGeoJson Json?
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  plumberServiceAreas PlumberServiceArea[]
+}
+
+model PlumberServiceArea {
+  id               String         @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile @relation(fields: [plumberProfileId], references: [id])
+  serviceZoneId    String
+  serviceZone      ServiceZone    @relation(fields: [serviceZoneId], references: [id])
+  radiusKmOverride Float?
+  createdAt        DateTime       @default(now())
+
+  @@unique([plumberProfileId, serviceZoneId])
+}
+
+model AvailabilityRule {
+  id               String         @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile @relation(fields: [plumberProfileId], references: [id])
+  dayOfWeek        Int // 0=Sunday .. 6=Saturday
+  startMinuteOfDay Int
+  endMinuteOfDay   Int
+  createdAt        DateTime       @default(now())
+
+  @@index([plumberProfileId])
+}
+
+model AvailabilityException {
+  id               String         @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile @relation(fields: [plumberProfileId], references: [id])
+  date             DateTime
+  isAvailable      Boolean
+  reason           String?
+  createdAt        DateTime       @default(now())
+
+  @@index([plumberProfileId, date])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 manual-mode service requests
+// ---------------------------------------------------------------------------
+
+enum ServiceRequestStatus {
+  NEW
+  CONTACTED
+  PLUMBER_ASSIGNED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_PLUMBER_AVAILABLE
+}
+
+enum Urgency {
+  SCHEDULED
+  INSTANT
+  EMERGENCY
+}
+
+model ServiceRequest {
+  id                       String               @id @default(uuid())
+  contactName              String
+  contactEmail             String
+  contactPhone             String
+  addressLine1             String
+  addressLine2             String?
+  city                     String
+  province                 String               @default("ON")
+  postalCode               String
+  lat                      Float?
+  lng                      Float?
+  categoryId               String
+  category                 ServiceCategory      @relation(fields: [categoryId], references: [id])
+  problemDescription       String
+  urgency                  Urgency
+  scheduledFor             DateTime?
+  status                   ServiceRequestStatus @default(NEW)
+  assignedPlumberProfileId String?
+  assignedPlumberProfile   PlumberProfile?      @relation(fields: [assignedPlumberProfileId], references: [id])
+  statusToken              String               @unique @default(uuid())
+  reviewToken              String               @unique @default(uuid())
+  marketingConsent         Boolean              @default(false)
+  isDemoData               Boolean              @default(false)
+  createdAt                DateTime             @default(now())
+  updatedAt                DateTime             @updatedAt
+
+  photos   ServiceRequestMedia[]
+  notes    ServiceRequestNote[]
+  invoices Invoice[]
+  review   Review?
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ServiceRequestMedia {
+  id               String         @id @default(uuid())
+  serviceRequestId String
+  serviceRequest   ServiceRequest @relation(fields: [serviceRequestId], references: [id])
+  mediaId          String
+  createdAt        DateTime       @default(now())
+
+  @@index([serviceRequestId])
+}
+
+model ServiceRequestNote {
+  id               String         @id @default(uuid())
+  serviceRequestId String
+  serviceRequest   ServiceRequest @relation(fields: [serviceRequestId], references: [id])
+  authorUserId     String
+  note             String
+  createdAt        DateTime       @default(now())
+
+  @@index([serviceRequestId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 self-serve booking lifecycle (schema-ready, see docs/feature-matrix.md)
+// ---------------------------------------------------------------------------
+
+enum BookingStatus {
+  DRAFT
+  REQUESTED
+  SEARCHING
+  OFFERED
+  ACCEPTED
+  EN_ROUTE
+  ARRIVED
+  INSPECTION_IN_PROGRESS
+  ESTIMATE_PENDING
+  ESTIMATE_APPROVED
+  ESTIMATE_REJECTED
+  WORK_IN_PROGRESS
+  WORK_PAUSED
+  WORK_COMPLETED
+  COMPLETION_CONFIRMATION_PENDING
+  PAYMENT_PROCESSING
+  PAID
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_PLUMBER
+  CANCELLED_BY_ADMIN
+  DISPUTED
+  PARTIALLY_REFUNDED
+  REFUNDED
+  CLOSED
+  NO_PLUMBER_AVAILABLE
+  NO_SHOW
+}
+
+model Booking {
+  id                 String           @id @default(uuid())
+  customerProfileId  String
+  customerProfile    CustomerProfile  @relation(fields: [customerProfileId], references: [id])
+  addressId          String?
+  address            CustomerAddress? @relation(fields: [addressId], references: [id])
+  plumberProfileId   String?
+  plumberProfile     PlumberProfile?  @relation(fields: [plumberProfileId], references: [id])
+  categoryId         String
+  category           ServiceCategory  @relation(fields: [categoryId], references: [id])
+  status             BookingStatus    @default(DRAFT)
+  urgency            Urgency
+  scheduledFor       DateTime?
+  problemDescription String
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  statusHistory  BookingStatusHistory[]
+  dispatchOffers DispatchOffer[]
+  locationEvents LocationEvent[]
+  media          Media[]
+  estimates      Estimate[]
+  changeOrders   ChangeOrder[]
+  invoice        Invoice?
+  messages       Message[]
+  review         Review?
+  disputes       Dispute[]
+
+  @@index([status, createdAt])
+  @@index([customerProfileId])
+  @@index([plumberProfileId])
+}
+
+model BookingStatusHistory {
+  id          String         @id @default(uuid())
+  bookingId   String
+  booking     Booking        @relation(fields: [bookingId], references: [id])
+  fromStatus  BookingStatus?
+  toStatus    BookingStatus
+  actorUserId String?
+  actorRole   String?
+  reason      String?
+  createdAt   DateTime       @default(now())
+
+  @@index([bookingId])
+}
+
+enum DispatchOfferResponse {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model DispatchOffer {
+  id               String                @id @default(uuid())
+  bookingId        String
+  booking          Booking               @relation(fields: [bookingId], references: [id])
+  plumberProfileId String
+  plumberProfile   PlumberProfile        @relation(fields: [plumberProfileId], references: [id])
+  batchNumber      Int
+  offeredAt        DateTime              @default(now())
+  expiresAt        DateTime
+  respondedAt      DateTime?
+  response         DispatchOfferResponse @default(PENDING)
+
+  @@index([bookingId])
+  @@index([plumberProfileId])
+}
+
+model LocationEvent {
+  id               String         @id @default(uuid())
+  bookingId        String
+  booking          Booking        @relation(fields: [bookingId], references: [id])
+  plumberProfileId String
+  plumberProfile   PlumberProfile @relation(fields: [plumberProfileId], references: [id])
+  lat              Float
+  lng              Float
+  accuracyMeters   Float?
+  headingDegrees   Float?
+  speedKmh         Float?
+  recordedAt       DateTime       @default(now())
+
+  // Retention: purged automatically N days after booking closes — see
+  // docs/architecture.md real-time-location retention policy. Insert-only.
+  @@index([bookingId, recordedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Media
+// ---------------------------------------------------------------------------
+
+enum MediaPurpose {
+  SERVICE_REQUEST_PHOTO
+  JOB_PHOTO
+  LICENSE_DOCUMENT
+  INSURANCE_DOCUMENT
+  ESTIMATE_PHOTO
+  PROFILE_PHOTO
+  BUSINESS_LOGO
+  DISPUTE_EVIDENCE
+  MESSAGE_ATTACHMENT
+}
+
+model Media {
+  id          String       @id @default(uuid())
+  ownerUserId String?
+  purpose     MediaPurpose
+  storageKey  String
+  mimeType    String
+  sizeBytes   Int
+  isPrivate   Boolean      @default(true)
+  bookingId   String?
+  booking     Booking?     @relation(fields: [bookingId], references: [id])
+  createdAt   DateTime     @default(now())
+
+  messageAttachments MessageAttachment[]
+
+  @@index([ownerUserId])
+  @@index([bookingId])
+}
+
+// ---------------------------------------------------------------------------
+// Estimates / change orders
+// ---------------------------------------------------------------------------
+
+enum EstimateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUPERSEDED
+}
+
+model Estimate {
+  id        String         @id @default(uuid())
+  bookingId String
+  booking   Booking        @relation(fields: [bookingId], references: [id])
+  status    EstimateStatus @default(PENDING)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  versions EstimateVersion[]
+
+  @@index([bookingId])
+}
+
+model EstimateVersion {
+  id                       String   @id @default(uuid())
+  estimateId               String
+  estimate                 Estimate @relation(fields: [estimateId], references: [id])
+  versionNumber            Int
+  subtotalCents            Int
+  notes                    String?
+  estimatedDurationMinutes Int?
+  expiresAt                DateTime
+  createdByUserId          String
+  createdAt                DateTime @default(now())
+
+  // Immutable — never updated after creation, only superseded by a new version.
+  lineItems                EstimateLineItem[]
+  customerApprovals        CustomerApproval[]
+  supersededByChangeOrders ChangeOrder[]      @relation("PreviousVersion")
+  supersedesChangeOrders   ChangeOrder[]      @relation("NewVersion")
+
+  @@unique([estimateId, versionNumber])
+}
+
+enum LineItemKind {
+  LABOUR
+  MATERIALS
+  FEE
+}
+
+model EstimateLineItem {
+  id                String          @id @default(uuid())
+  estimateVersionId String
+  estimateVersion   EstimateVersion @relation(fields: [estimateVersionId], references: [id])
+  description       String
+  kind              LineItemKind
+  quantity          Decimal         @db.Decimal(10, 2)
+  unitPriceCents    Int
+  taxable           Boolean         @default(true)
+  notes             String?
+
+  @@index([estimateVersionId])
+}
+
+model CustomerApproval {
+  id                String          @id @default(uuid())
+  estimateVersionId String
+  estimateVersion   EstimateVersion @relation(fields: [estimateVersionId], references: [id])
+  customerProfileId String
+  customerProfile   CustomerProfile @relation(fields: [customerProfileId], references: [id])
+  decision          String // approved | rejected
+  decidedAt         DateTime        @default(now())
+
+  @@index([estimateVersionId])
+}
+
+model ChangeOrder {
+  id                        String          @id @default(uuid())
+  bookingId                 String
+  booking                   Booking         @relation(fields: [bookingId], references: [id])
+  previousEstimateVersionId String
+  previousEstimateVersion   EstimateVersion @relation("PreviousVersion", fields: [previousEstimateVersionId], references: [id])
+  newEstimateVersionId      String
+  newEstimateVersion        EstimateVersion @relation("NewVersion", fields: [newEstimateVersionId], references: [id])
+  reason                    String
+  createdAt                 DateTime        @default(now())
+
+  @@index([bookingId])
+}
+
+// ---------------------------------------------------------------------------
+// Invoicing & payments
+// ---------------------------------------------------------------------------
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  PARTIALLY_REFUNDED
+  REFUNDED
+  VOID
+}
+
+model Invoice {
+  id                 String           @id @default(uuid())
+  bookingId          String?          @unique
+  booking            Booking?         @relation(fields: [bookingId], references: [id])
+  serviceRequestId   String?
+  serviceRequest     ServiceRequest?  @relation(fields: [serviceRequestId], references: [id])
+  customerProfileId  String?
+  customerProfile    CustomerProfile? @relation(fields: [customerProfileId], references: [id])
+  plumberProfileId   String?
+  plumberProfile     PlumberProfile?  @relation(fields: [plumberProfileId], references: [id])
+  subtotalCents      Int
+  discountCents      Int              @default(0)
+  emergencyFeeCents  Int              @default(0)
+  hstCents           Int
+  totalCents         Int
+  commissionCents    Int
+  plumberPayoutCents Int
+  status             InvoiceStatus    @default(DRAFT)
+  notes              String?
+  issuedAt           DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  lineItems    InvoiceLineItem[]
+  transactions PaymentTransaction[]
+
+  @@index([status])
+  @@index([customerProfileId])
+  @@index([plumberProfileId])
+}
+
+model InvoiceLineItem {
+  id             String       @id @default(uuid())
+  invoiceId      String
+  invoice        Invoice      @relation(fields: [invoiceId], references: [id])
+  description    String
+  kind           LineItemKind
+  quantity       Decimal      @db.Decimal(10, 2)
+  unitPriceCents Int
+  taxable        Boolean      @default(true)
+  totalCents     Int
+  notes          String?
+
+  @@index([invoiceId])
+}
+
+model PaymentMethodRef {
+  id                      String          @id @default(uuid())
+  customerProfileId       String
+  customerProfile         CustomerProfile @relation(fields: [customerProfileId], references: [id])
+  provider                String          @default("stripe")
+  providerPaymentMethodId String
+  brand                   String?
+  last4                   String?
+  expMonth                Int?
+  expYear                 Int?
+  createdAt               DateTime        @default(now())
+
+  @@index([customerProfileId])
+}
+
+enum PaymentTransactionType {
+  AUTHORIZATION
+  CAPTURE
+  REFUND
+  PAYOUT
+}
+
+enum PaymentTransactionStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model PaymentTransaction {
+  id                    String                   @id @default(uuid())
+  invoiceId             String
+  invoice               Invoice                  @relation(fields: [invoiceId], references: [id])
+  provider              String                   @default("stripe")
+  providerTransactionId String?
+  type                  PaymentTransactionType
+  amountCents           Int
+  currency              String                   @default("CAD")
+  status                PaymentTransactionStatus @default(PENDING)
+  idempotencyKey        String                   @unique
+  failureReason         String?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+
+  platformFee PlatformFee?
+  refunds     Refund[]
+  events      PaymentTransactionEvent[]
+
+  @@index([invoiceId])
+  @@index([providerTransactionId])
+}
+
+// Append-only audit trail for a payment transaction's lifecycle (webhook
+// deliveries, retries, status changes) — satisfies "every monetary
+// transaction must have ... audit history" without mutating the transaction row.
+model PaymentTransactionEvent {
+  id                   String             @id @default(uuid())
+  paymentTransactionId String
+  paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id])
+  eventType            String
+  payload              Json
+  createdAt            DateTime           @default(now())
+
+  @@index([paymentTransactionId])
+}
+
+model PlatformFee {
+  id                   String             @id @default(uuid())
+  paymentTransactionId String             @unique
+  paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id])
+  commissionCents      Int
+  emergencyFeeCents    Int                @default(0)
+  hstCents             Int
+  netToPlumberCents    Int
+  createdAt            DateTime           @default(now())
+}
+
+enum PayoutStatus {
+  PENDING
+  AVAILABLE
+  IN_TRANSIT
+  PAID
+  FAILED
+}
+
+model Payout {
+  id               String         @id @default(uuid())
+  plumberProfileId String
+  plumberProfile   PlumberProfile @relation(fields: [plumberProfileId], references: [id])
+  amountCents      Int
+  status           PayoutStatus   @default(PENDING)
+  providerPayoutId String?
+  periodStart      DateTime
+  periodEnd        DateTime
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([plumberProfileId, status])
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+model Refund {
+  id                   String             @id @default(uuid())
+  paymentTransactionId String
+  paymentTransaction   PaymentTransaction @relation(fields: [paymentTransactionId], references: [id])
+  amountCents          Int
+  reason               String
+  decidedByUserId      String
+  status               RefundStatus       @default(PENDING)
+  providerRefundId     String?
+  createdAt            DateTime           @default(now())
+
+  @@index([paymentTransactionId])
+}
+
+// ---------------------------------------------------------------------------
+// Disputes
+// ---------------------------------------------------------------------------
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+}
+
+enum DisputeResolution {
+  PARTIAL_REFUND
+  FULL_REFUND
+  NO_REFUND
+  ACCOUNT_CREDIT
+}
+
+model Dispute {
+  id                String             @id @default(uuid())
+  bookingId         String?
+  booking           Booking?           @relation(fields: [bookingId], references: [id])
+  customerProfileId String
+  customerProfile   CustomerProfile    @relation(fields: [customerProfileId], references: [id])
+  plumberProfileId  String?
+  plumberProfile    PlumberProfile?    @relation(fields: [plumberProfileId], references: [id])
+  reason            String
+  description       String
+  status            DisputeStatus      @default(OPEN)
+  resolution        DisputeResolution?
+  resolvedByUserId  String?
+  resolvedAt        DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  evidence DisputeEvidence[]
+
+  @@index([status])
+  @@index([customerProfileId])
+}
+
+model DisputeEvidence {
+  id        String   @id @default(uuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id])
+  mediaId   String?
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([disputeId])
+}
+
+// ---------------------------------------------------------------------------
+// Messaging
+// ---------------------------------------------------------------------------
+
+model Message {
+  id              String    @id @default(uuid())
+  bookingId       String
+  booking         Booking   @relation(fields: [bookingId], references: [id])
+  senderUserId    String
+  sender          User      @relation("MessageSender", fields: [senderUserId], references: [id])
+  body            String
+  isSystemMessage Boolean   @default(false)
+  sentAt          DateTime  @default(now())
+  readAt          DateTime?
+  reportedAt      DateTime?
+
+  attachments MessageAttachment[]
+
+  @@index([bookingId, sentAt])
+}
+
+model MessageAttachment {
+  id        String  @id @default(uuid())
+  messageId String
+  message   Message @relation(fields: [messageId], references: [id])
+  mediaId   String
+  media     Media   @relation(fields: [mediaId], references: [id])
+
+  @@index([messageId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  PUSH
+  SMS
+}
+
+model Notification {
+  id        String              @id @default(uuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id])
+  type      String
+  title     String
+  body      String
+  channel   NotificationChannel
+  dedupeKey String?
+  sentAt    DateTime?
+  readAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt])
+}
+
+// ---------------------------------------------------------------------------
+// Reviews
+// ---------------------------------------------------------------------------
+
+model Review {
+  id                    String           @id @default(uuid())
+  bookingId             String?          @unique
+  booking               Booking?         @relation(fields: [bookingId], references: [id])
+  serviceRequestId      String?          @unique
+  serviceRequest        ServiceRequest?  @relation(fields: [serviceRequestId], references: [id])
+  customerProfileId     String?
+  customerProfile       CustomerProfile? @relation(fields: [customerProfileId], references: [id])
+  plumberProfileId      String
+  plumberProfile        PlumberProfile   @relation(fields: [plumberProfileId], references: [id])
+  overallRating         Int
+  punctualityRating     Int?
+  communicationRating   Int?
+  professionalismRating Int?
+  valueRating           Int?
+  comment               String?
+  plumberResponse       String?
+  plumberRespondedAt    DateTime?
+  isVerifiedBooking     Boolean          @default(true)
+  editableUntil         DateTime
+  isDemoData            Boolean          @default(false)
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  reports ReviewReport[]
+
+  @@index([plumberProfileId])
+}
+
+model ReviewReport {
+  id               String   @id @default(uuid())
+  reviewId         String
+  review           Review   @relation(fields: [reviewId], references: [id])
+  reportedByUserId String
+  reportedBy       User     @relation(fields: [reportedByUserId], references: [id])
+  reason           String
+  status           String   @default("open")
+  createdAt        DateTime @default(now())
+
+  @@index([reviewId])
+}
+
+model FavoritePlumber {
+  id                String          @id @default(uuid())
+  customerProfileId String
+  customerProfile   CustomerProfile @relation(fields: [customerProfileId], references: [id])
+  plumberProfileId  String
+  plumberProfile    PlumberProfile  @relation(fields: [plumberProfileId], references: [id])
+  createdAt         DateTime        @default(now())
+
+  @@unique([customerProfileId, plumberProfileId])
+}
+
+enum BlockedBy {
+  CUSTOMER
+  PLUMBER
+}
+
+model BlockedRelationship {
+  id                String          @id @default(uuid())
+  customerProfileId String
+  customerProfile   CustomerProfile @relation("CustomerBlocks", fields: [customerProfileId], references: [id])
+  plumberProfileId  String
+  plumberProfile    PlumberProfile  @relation("PlumberBlocks", fields: [plumberProfileId], references: [id])
+  blockedBy         BlockedBy
+  createdAt         DateTime        @default(now())
+
+  @@unique([customerProfileId, plumberProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Growth: subscriptions, promotions (schema-ready, flagged off — Phase 5)
+// ---------------------------------------------------------------------------
+
+model SubscriptionPlan {
+  id         String  @id @default(uuid())
+  slug       String  @unique
+  name       String
+  priceCents Int
+  interval   String  @default("month")
+  features   Json    @default("[]")
+  active     Boolean @default(true)
+
+  subscriptions Subscription[]
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+}
+
+model Subscription {
+  id                   String             @id @default(uuid())
+  plumberProfileId     String
+  plumberProfile       PlumberProfile     @relation(fields: [plumberProfileId], references: [id])
+  planId               String
+  plan                 SubscriptionPlan   @relation(fields: [planId], references: [id])
+  status               SubscriptionStatus @default(ACTIVE)
+  currentPeriodEnd     DateTime
+  stripeSubscriptionId String?
+  createdAt            DateTime           @default(now())
+
+  @@index([plumberProfileId])
+}
+
+enum PromotionType {
+  FOUNDING_PLUMBER
+  COUPON
+  OTHER
+}
+
+model Promotion {
+  id                String          @id @default(uuid())
+  type              PromotionType
+  plumberProfileId  String?
+  plumberProfile    PlumberProfile? @relation(fields: [plumberProfileId], references: [id])
+  commissionPercent Int?
+  startsAt          DateTime
+  endsAt            DateTime
+  params            Json            @default("{}")
+  createdAt         DateTime        @default(now())
+
+  @@index([plumberProfileId])
+}
+
+// ---------------------------------------------------------------------------
+// Support
+// ---------------------------------------------------------------------------
+
+enum SupportCaseStatus {
+  OPEN
+  PENDING
+  RESOLVED
+  CLOSED
+}
+
+model SupportCase {
+  id               String            @id @default(uuid())
+  openedByUserId   String
+  openedBy         User              @relation("SupportCaseOpener", fields: [openedByUserId], references: [id])
+  subjectType      String
+  subjectId        String
+  status           SupportCaseStatus @default(OPEN)
+  priority         String            @default("normal")
+  assignedToUserId String?
+  assignedTo       User?             @relation("SupportCaseAssignee", fields: [assignedToUserId], references: [id])
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  messages SupportCaseMessage[]
+
+  @@index([status])
+}
+
+model SupportCaseMessage {
+  id            String      @id @default(uuid())
+  supportCaseId String
+  supportCase   SupportCase @relation(fields: [supportCaseId], references: [id])
+  authorUserId  String
+  author        User        @relation(fields: [authorUserId], references: [id])
+  body          String
+  internalNote  Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+
+  @@index([supportCaseId])
+}
+
+// ---------------------------------------------------------------------------
+// Platform: audit, analytics, flags, settings, legal
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?
+  actor       User?    @relation("AuditActor", fields: [actorUserId], references: [id])
+  actorRole   String?
+  action      String
+  targetType  String
+  targetId    String
+  beforeJson  Json?
+  afterJson   Json?
+  reason      String?
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  // Append-only: no update path is exposed anywhere in the API layer.
+  @@index([targetType, targetId])
+  @@index([actorUserId])
+  @@index([createdAt])
+}
+
+model AnalyticsEvent {
+  id         String   @id @default(uuid())
+  eventName  String
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  sessionId  String?
+  properties Json     @default("{}")
+  isDemoData Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([eventName, createdAt])
+}
+
+model FeatureFlag {
+  key         String   @id
+  enabled     Boolean
+  description String?
+  updatedAt   DateTime @updatedAt
+}
+
+model AppSetting {
+  key             String   @id
+  valueJson       Json
+  updatedAt       DateTime @updatedAt
+  updatedByUserId String?
+}
+
+model LegalPolicyVersion {
+  id              String   @id @default(uuid())
+  slug            String
+  version         String
+  contentUrl      String?
+  contentMarkdown String?
+  publishedAt     DateTime @default(now())
+
+  acceptances PolicyAcceptance[]
+
+  @@unique([slug, version])
+}
+
+model PolicyAcceptance {
+  id                   String             @id @default(uuid())
+  userId               String
+  user                 User               @relation(fields: [userId], references: [id])
+  legalPolicyVersionId String
+  legalPolicyVersion   LegalPolicyVersion @relation(fields: [legalPolicyVersionId], references: [id])
+  acceptedAt           DateTime           @default(now())
+
+  @@index([userId])
+}
